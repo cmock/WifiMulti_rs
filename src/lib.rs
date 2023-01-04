@@ -61,14 +61,14 @@ pub struct WifiMulti<'a> {
     stop: Arc<AtomicBool>,
 }
 
-impl<'a> WifiMulti<'static> {
+impl WifiMulti<'static> {
     /// Creates an empty WifiMulti object.
     pub fn new() -> Self {
         // shared, needs to be created here or wifi_thread will panic
         let peripherals = Peripherals::take().unwrap();
         let sysloop = EspSystemEventLoop::take().unwrap();
         let wifi = Arc::new(Mutex::new(
-            EspWifi::new(peripherals.modem, sysloop.clone(), None).unwrap(),
+            EspWifi::new(peripherals.modem, sysloop, None).unwrap(),
         ));
 
         Self {
@@ -76,7 +76,7 @@ impl<'a> WifiMulti<'static> {
             state: Arc::new(Mutex::new(Err(Error::Stopped))),
             wifi_thread_handle: None,
             ssid: Arc::new(Mutex::new("".to_string())),
-            wifi: wifi,
+            wifi,
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -129,9 +129,7 @@ impl<'a> WifiMulti<'static> {
     /// success or `Err()` with the latest `state()` on timeout.
     pub fn run_wait(&mut self, timeout: Duration) -> Result<(), Error> {
         let start = Instant::now();
-        if let Err(e) = self.run() {
-            return Err(e);
-        }
+        self.run()?;
         loop {
             match self.state() {
                 Ok(()) => return Ok(()),
@@ -156,7 +154,7 @@ impl<'a> WifiMulti<'static> {
     /// Returns the SSID that we're connected to.
     pub fn connected_ssid(&self) -> Result<String, Error> {
         // return connected SSID, if any
-        let s: &Result<(), Error> = &*self.state.lock().unwrap();
+        let s: &Result<(), Error> = &self.state.lock().unwrap();
         match s {
             Ok(()) => Ok((*self.ssid.lock().unwrap()).clone()),
             Err(e) => Err(*e),
@@ -167,6 +165,12 @@ impl<'a> WifiMulti<'static> {
     /// connected or one of the `Error`s.
     pub fn state(&self) -> Result<(), Error> {
         *self.state.lock().unwrap()
+    }
+}
+
+impl Default for WifiMulti<'static> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
