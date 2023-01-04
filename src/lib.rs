@@ -1,18 +1,32 @@
+//! A crate to simplify establishing and keeping a Wifi connection on ESP32.
+//!
+//!     let mut wfm = WifiMulti::new();
+//!     wfm.add("ssid1", "psk1")?;
+//!     wfm.add("ssid2", "psk2")?;
+//!     wfm.run()?;
+//!
+//! This will spawn a thread that searches for the given SSIDs,
+//! selects the strongest one, and tries to stay connected (to any of
+//! the SSIDs) forever.
+
 use embedded_svc::wifi::*;
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::wifi::EspWifi;
 use std::net::Ipv4Addr;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const WIFI_TIMEOUT: u32 = 15;
 
-#[derive(Debug, Clone, Copy, thiserror::Error)]
+/// Errors and states
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq)]
 pub enum Error {
-    #[error("Initialising")]
-    Init,
+    #[error("Stopped")]
+    Stopped,
     #[error("Searching")]
     Searching,
     #[error("Disconnected")]
@@ -41,9 +55,11 @@ pub struct WifiMulti<'a> {
     wifi_thread_handle: Option<thread::JoinHandle<()>>,
     ssid: Arc<Mutex<String>>,
     wifi: Arc<Mutex<EspWifi<'a>>>,
+    stop: Arc<AtomicBool>,
 }
 
 impl<'a> WifiMulti<'static> {
+    /// Creates an empty WifiMulti object.
     pub fn new() -> Self {
         // shared, needs to be created here or wifi_thread will panic
         let peripherals = Peripherals::take().unwrap();
@@ -54,15 +70,21 @@ impl<'a> WifiMulti<'static> {
 
         Self {
             ssid_list: Arc::new(Mutex::new(vec![])),
-            state: Arc::new(Mutex::new(Err(Error::Init))),
+            state: Arc::new(Mutex::new(Err(Error::Stopped))),
             wifi_thread_handle: None,
             ssid: Arc::new(Mutex::new("".to_string())),
             wifi: wifi,
+            stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    /// Add an SSID with its pre-shared key.
+    ///
+    /// The number you can add is not limited.
+    ///
+    /// Cannot be called after `run()` has been called.
     pub fn add(&mut self, ssid: &str, psk: &str) -> Result<(), Error> {
-        if self.wifi_thread_handle.is_some() {
+        if *self.state.lock().unwrap() != Err(Error::Stopped) {
             return Err(Error::AlreadyRunning);
         }
 
@@ -73,15 +95,15 @@ impl<'a> WifiMulti<'static> {
         Ok(())
     }
 
-    // returns Ok when the checks are cleared and the background task has
-    // been started...
+    /// Starts the Wifi thread and returns immediately.
     pub fn run(&mut self) -> Result<(), Error> {
         if self.ssid_list.lock().unwrap().is_empty() {
             return Err(Error::NoSSIDList);
         }
-        if self.wifi_thread_handle.is_some() {
+        if *self.state.lock().unwrap() != Err(Error::Stopped) {
             return Err(Error::AlreadyRunning);
         }
+        self.stop.store(false, Ordering::SeqCst);
 
         let builder = thread::Builder::new()
             .name("WifiMulti".into())
@@ -90,18 +112,45 @@ impl<'a> WifiMulti<'static> {
         let ssid = Arc::clone(&self.ssid);
         let ssidlist = Arc::clone(&self.ssid_list);
         let wifi = Arc::clone(&self.wifi);
+        let stop = Arc::clone(&self.stop);
         self.wifi_thread_handle = Some(
             builder
-                .spawn(move || _run(state, ssid, wifi, ssidlist))
+                .spawn(move || _run(state, ssid, wifi, ssidlist, stop))
                 .unwrap(),
         );
         Ok(())
     }
 
-    pub fn run_wait(&self, timeout: Duration) -> Result<(), Error> {
-        Ok(())
+    /// Like `run()`, but waits for a connection to be established or
+    /// the timeout (in seconds) to expire. Returns either `Ok(())` on
+    /// success or `Err()` with the latest `state()` on timeout.
+    pub fn run_wait(&mut self, timeout: Duration) -> Result<(), Error> {
+        let start = Instant::now();
+        if let Err(e) = self.run() {
+            return Err(e);
+        }
+        loop {
+            match self.state() {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if start.elapsed() > timeout {
+                        return Err(e);
+                    } else {
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                }
+            }
+        }
     }
 
+    /// Disconnect Wifi, stop the thread.
+    ///
+    /// Returns immediately, check `state()` for `Err(Stopped)`.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns the SSID that we're connected to.
     pub fn connected_ssid(&self) -> Result<String, Error> {
         // return connected SSID, if any
         let s: &Result<(), Error> = &*self.state.lock().unwrap();
@@ -111,6 +160,8 @@ impl<'a> WifiMulti<'static> {
         }
     }
 
+    /// Returns the state of the connection -- either `Ok(())` when
+    /// connected or one of the `Error`s.
     pub fn state(&self) -> Result<(), Error> {
         *self.state.lock().unwrap()
     }
@@ -121,6 +172,7 @@ fn _run(
     ssid: Arc<Mutex<String>>,
     wifi: Arc<Mutex<EspWifi>>,
     ssid_list: Arc<Mutex<Vec<SSIDEntry>>>,
+    stop: Arc<AtomicBool>,
 ) {
     loop {
         // scan APs
@@ -180,6 +232,9 @@ fn _run(
         // loop and check; restart wifi on consecutive failures
         loop {
             thread::sleep(Duration::from_secs(1));
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
             {
                 let wifi = wifi.lock().unwrap();
 
@@ -200,11 +255,14 @@ fn _run(
             }
         }
         *state.lock().unwrap() = Err(Error::ConnectTimeout);
-        //info!("wifi_thread: trying to restart WiFi connection");
         {
             let mut wifi = wifi.lock().unwrap();
             wifi.disconnect().unwrap();
             wifi.stop().unwrap();
+        }
+        if stop.load(Ordering::SeqCst) {
+            *state.lock().unwrap() = Err(Error::Stopped);
+            return;
         }
         thread::sleep(Duration::from_secs(1));
     }

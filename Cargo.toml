@@ -1,9 +1,13 @@
 [package]
 name = "wifi_multi"
+authors = ["cm <cm@coretec.at>"]
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[package.metadata.esp-idf-sys]
+esp_idf_tools_install_dir = "global"
 
 [dependencies]
 #esp-idf-sys = { version = "0.32", features = ["binstart"] }
