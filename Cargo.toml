@@ -1,6 +1,6 @@
 [package]
 name = "wifi_multi"
-authors = ["cm <cm@coretec.at>"]
+authors = ["christian mock <cm@tahina.priv.at>"]
 version = "0.1.0"
 edition = "2021"
 
