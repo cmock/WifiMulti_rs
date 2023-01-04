@@ -1,9 +1,12 @@
 //! A crate to simplify establishing and keeping a Wifi connection on ESP32.
+//! ```ignore
+//!    use wifi_multi::WifiMulti;
 //!
-//!     let mut wfm = WifiMulti::new();
-//!     wfm.add("ssid1", "psk1")?;
-//!     wfm.add("ssid2", "psk2")?;
-//!     wfm.run()?;
+//!    let mut wfm = WifiMulti::new();
+//!    wfm.add("ssid1", "psk1")?;
+//!    wfm.add("ssid2", "psk2")?;
+//!    wfm.run()?;
+//! ```
 //!
 //! This will spawn a thread that searches for the given SSIDs,
 //! selects the strongest one, and tries to stay connected (to any of
